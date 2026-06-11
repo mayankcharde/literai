@@ -256,7 +256,7 @@ if st.session_state.research_results:
                         response = requests.post(
                             f"{API_URL}/research/rag/setup",
                             params={"session_id": st.session_state.current_session_id},
-                            timeout=60
+                            timeout=600
                         )
                         if response.status_code == 200:
                             st.session_state.rag_ready = True
