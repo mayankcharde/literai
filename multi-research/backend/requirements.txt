@@ -42,7 +42,7 @@ requests>=2.31.0
 python-multipart>=0.0.6
 
 # Text Processing (lightweight)
-textblob>=0.17.1
+# textblob>=0.17.1
 beautifulsoup4>=4.12.0
 nltk>=3.8.1
 numpy>=1.24.0
