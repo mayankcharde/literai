@@ -1,0 +1,22 @@
+# ChromaDB vector database
+research_chroma_db/
+chroma/
+*.chroma
+/chroma_db/
+
+# Environment variables
+.env
+*.env
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
