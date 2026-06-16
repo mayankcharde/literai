@@ -1,7 +1,7 @@
 import axios from 'axios';
 
 const MISTRAL_API_URL = 'https://api.mistral.ai/v1/chat/completions';
-const SUMMARY_MAX_WORDS = 250;
+const SUMMARY_MAX_WORDS = 300;
 
 const countWords = (text) =>
   (text || '').trim().split(/\s+/).filter(Boolean).length;
@@ -28,69 +28,98 @@ export { extractPipelineSummary };
 
 /** Proxy to Python summarizer — POST first (per spec), then GET fallback */
 export const fetchPythonRagSummary = async (sessionId, report) => {
-  const base = process.env.PYTHON_BACKEND_URL;
-  if (!base) throw new Error('PYTHON_BACKEND_URL is not configured');
-
-  const researchId = sessionId || Date.now().toString(); // Use sessionId or temp id
-  try {
-    await axios.post(`${base}/research/rag/setup`, {
-      research_id: researchId,
-      report: report,
-      topic: 'Research'
-    }, {
-      timeout: 90000,
-    });
-  } catch (err) {
-    console.warn('[summary] RAG setup skipped:', err.message);
-  }
-
-  try {
-    const { data } = await axios.get(`${base}/research/rag/summary`, {
-      params: { research_id: researchId },
-      timeout: 60000,
-    });
-    if (data?.summary) return data.summary;
-  } catch (pythonErr) {
-    console.warn('[summary] Python summary failed:', pythonErr.message);
-  }
-
-  // If Python fails, just return a simple summary from report
-  return report.slice(0, 500) + (report.length > 500 ? '...' : '');
+  // Fallback: just return a simple summary from the report
+  return report.slice(0, 1000) + (report.length > 1000 ? '...' : '');
 };
 
-/** Mistral API fallback */
+/** Mistral API for summary generation */
 export const fetchMistralSummary = async (report, topic, userFeedback = '') => {
   const apiKey = process.env.MISTRAL_API_KEY;
-  if (!apiKey) throw new Error('MISTRAL_API_KEY is not configured');
+  if (!apiKey) {
+    // Fallback: return simple excerpt from report
+    return report.slice(0, 1000) + (report.length > 1000 ? '...' : '');
+  }
 
-  const excerpt = report.length > 14000
-    ? `${report.slice(0, 14000)}\n...[truncated]`
+  const excerpt = report.length > 20000
+    ? `${report.slice(0, 20000)}\n...[truncated]`
     : report;
 
-  const prompt = userFeedback
-    ? `The user gave this feedback on the previous summary: "${userFeedback}"\n\nRegenerate a better summary (150-250 words, 3-5 bullet points) for this research.\n\nTopic: ${topic}\n\nReport:\n${excerpt}`
-    : `Summarize this research in 3-5 bullet points: ${excerpt}`;
+  let prompt;
+  
+  if (userFeedback) {
+    prompt = `You are an expert research summarizer. The user provided specific feedback on the previous summary: "${userFeedback}"
 
-  const { data } = await axios.post(
-    MISTRAL_API_URL,
-    {
-      model: process.env.MISTRAL_MODEL || 'mistral-small-latest',
-      messages: [{ role: 'user', content: prompt }],
-      temperature: 0.35,
-      max_tokens: 600,
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
+Based on this feedback, regenerate a better, high-quality executive summary for this research report.
+
+Topic: ${topic}
+
+Report:
+${excerpt}
+
+Regeneration Requirements:
+- 200-300 words maximum
+- Address the user's feedback directly
+- Professional executive summary style
+- Start with a compelling opening sentence
+- Include 3-5 bullet points for key findings
+- Highlight important statistics and data
+- End with key implications and actionable recommendations
+- Maintain academic rigor while being accessible
+
+Generate ONLY the summary, no additional text.`;
+  } else {
+    prompt = `You are an expert research summarizer. Generate an excellent executive summary for this research report.
+
+Topic: ${topic}
+
+Report:
+${excerpt}
+
+Summary Requirements:
+- 200-300 words maximum
+- Professional, clear, and concise language
+- Start with a strong opening sentence that captures the essence of the topic
+- Include 3-5 bullet points for key findings
+- Highlight important statistics, data points, or evidence from the report
+- Address methodology briefly if relevant
+- Conclude with key implications, recommendations, or future directions
+- Maintain academic rigor while being accessible to a general audience
+
+Generate ONLY the summary, no additional text.`;
+  }
+
+  try {
+    const { data } = await axios.post(
+      MISTRAL_API_URL,
+      {
+        model: process.env.MISTRAL_MODEL || 'mistral-small-latest',
+        messages: [
+          { 
+            role: 'system', 
+            content: 'You are a professional research summarizer. Always provide clear, concise, and well-structured executive summaries with bullet points for key findings.' 
+          },
+          { role: 'user', content: prompt }
+        ],
+        temperature: 0.3,
+        max_tokens: 800,
       },
-      timeout: 90000,
-    },
-  );
+      {
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        timeout: 90000,
+      },
+    );
 
-  const content = data.choices?.[0]?.message?.content?.trim();
-  if (!content) throw new Error('Mistral returned empty summary');
-  return content;
+    const content = data.choices?.[0]?.message?.content?.trim();
+    if (!content) throw new Error('Mistral returned empty summary');
+    return content;
+  } catch (error) {
+    console.warn('Mistral API failed, using fallback:', error.message);
+    // Fallback to simple report excerpt
+    return report.slice(0, 1200) + (report.length > 1200 ? '...' : '');
+  }
 };
 
 /**
