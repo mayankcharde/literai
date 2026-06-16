@@ -13,8 +13,18 @@ from rag_engine import ResearchRAGEngine
 import json
 
 
-# Initialize RAG engine globally
-rag_engine = ResearchRAGEngine(chunk_size=500, chunk_overlap=100)
+# Store RAG engines per research ID
+rag_engines: Dict[str, ResearchRAGEngine] = {}
+
+# New Pydantic models for RAG
+class RAGSetupRequest(BaseModel):
+    research_id: str
+    report: str
+    topic: Optional[str] = ""
+
+class RAGAskRequest(BaseModel):
+    research_id: str
+    question: str
 
 # Add backend directory to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -200,31 +210,23 @@ async def list_sessions():
 # Add these new endpoints after your existing ones
 
 @app.post("/research/rag/setup")
-async def setup_rag_from_research(session_id: str):
-    """Setup RAG from a completed research session"""
-    if session_id not in research_sessions:
-        raise HTTPException(status_code=404, detail="Session not found")
+async def setup_rag(request: RAGSetupRequest):
+    """Setup RAG with report text directly"""
+    if not request.report:
+        raise HTTPException(status_code=400, detail="Report content is required")
     
-    session = research_sessions[session_id]
-    if session["status"] != "completed":
-        raise HTTPException(status_code=400, detail="Research not completed")
-    
-    result = session.get("result", {})
-    report = result.get("formatted_output") or result.get("draft", "")
-    
-    if not report:
-        raise HTTPException(status_code=400, detail="No report content found")
-    
-    # Setup RAG engine
     try:
+        # Create a new RAG engine for this research ID
+        rag_engine = ResearchRAGEngine(chunk_size=500, chunk_overlap=100)
         rag_engine.create_vectorstore(
-            report=report,
+            report=request.report,
             metadata={
-                "session_id": session_id,
-                "topic": session["topic"],
-                "created_at": session.get("completed_at", "")
+                "research_id": request.research_id,
+                "topic": request.topic,
+                "created_at": datetime.now().isoformat()
             }
         )
+        rag_engines[request.research_id] = rag_engine
         
         return {
             "status": "success",
@@ -232,80 +234,69 @@ async def setup_rag_from_research(session_id: str):
             "stats": rag_engine.get_chunk_statistics()
         }
     except Exception as e:
+        print(f"RAG setup error: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/research/rag/ask")
-async def ask_question(question_data: dict):
-    """Ask a question about the research report"""
-    question = question_data.get("question")
-    
-    if not question:
+async def ask_question(request: RAGAskRequest):
+    """Ask a question about a specific research report"""
+    if not request.question:
         raise HTTPException(status_code=400, detail="Question required")
+    if not request.research_id:
+        raise HTTPException(status_code=400, detail="Research ID required")
     
     try:
-        result = rag_engine.ask_question(question)
+        rag_engine = rag_engines.get(request.research_id)
+        if not rag_engine or not rag_engine.is_initialized:
+            raise HTTPException(status_code=400, detail="RAG not initialized for this research. Please call /research/rag/setup first.")
+        
+        result = rag_engine.ask_question(request.question)
         return result
+    except HTTPException:
+        raise
     except Exception as e:
+        print(f"RAG ask error: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/research/rag/summary")
-async def get_rag_summary():
-    """Get a summary from the RAG system"""
+async def get_rag_summary(research_id: Optional[str] = None, report: Optional[str] = None):
+    """Get a summary from a specific RAG system, or generate directly from report"""
     try:
-        summary = rag_engine.get_summary()
-        return {"summary": summary}
+        if research_id and research_id in rag_engines:
+            rag_engine = rag_engines.get(research_id)
+            if rag_engine and rag_engine.is_initialized:
+                summary = rag_engine.get_summary()
+                return {"summary": summary}
+        
+        # If no engine, generate simple summary from report
+        if report:
+            simple_summary = report[:1000] + ("..." if len(report) > 1000 else "")
+            return {"summary": simple_summary}
+        
+        raise HTTPException(status_code=400, detail="Either research_id or report is required")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/research/rag/stats")
-async def get_rag_stats():
-    """Get RAG system statistics"""
+async def get_rag_stats(research_id: str):
+    """Get RAG system statistics for a specific research"""
     try:
+        rag_engine = rag_engines.get(research_id)
+        if not rag_engine:
+            raise HTTPException(status_code=400, detail="RAG not initialized for this research")
+        
         stats = rag_engine.get_chunk_statistics()
         return stats
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/research/rag/explain")
-async def explain_simply(concept_data: dict):
-    """Explain a concept from the report in simple terms"""
-    concept = concept_data.get("concept")
-    
-    if not concept:
-        raise HTTPException(status_code=400, detail="Concept required")
-    
-    # Search for relevant chunks about the concept
-    if not rag_engine.vectorstore:
-        raise HTTPException(status_code=400, detail="RAG not initialized")
-    
-    results = rag_engine.vectorstore.similarity_search(concept, k=3)
-    context = "\n".join([doc.page_content for doc in results])
-    
-    # Use LLM for simple explanation
-    from llm_setup import get_mistral_llm
-    llm = get_mistral_llm(temperature=0.5)
-    
-    prompt = f"""
-    Explain the concept "{concept}" in VERY simple terms (like explaining to a 12-year-old):
-    
-    Context from the research:
-    {context[:1000]}
-    
-    Provide:
-    1. Simple definition (1 sentence)
-    2. Real-world example
-    3. Why it matters (1 sentence)
-    
-    Keep it under 150 words total.
-    """
-    
-    response = llm.invoke(prompt)
-    
-    return {
-        "concept": concept,
-        "simple_explanation": response.content,
-        "sources_found": len(results)
-    }
     
 
 if __name__ == "__main__":

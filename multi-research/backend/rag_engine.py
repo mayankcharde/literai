@@ -597,17 +597,12 @@ class ResearchRAGEngine:
     
     def get_summary(self, max_chunks: int = 3) -> str:
         """Get a quick summary of the report using top chunks"""
-        if not self.is_initialized:
-            return "⚠️ RAG not initialized. Please initialize RAG first."
-        
-        if not hasattr(self, 'text_chunks') or not self.text_chunks:
-            return "No report loaded. Please initialize RAG first."
-        
-        try:
+        if hasattr(self, 'text_chunks') and self.text_chunks:
             summary = "\n\n".join(self.text_chunks[:max_chunks])
             return summary[:1000] + "..." if len(summary) > 1000 else summary
-        except Exception as e:
-            return f"Error generating summary: {str(e)}"
+        
+        return ""
+        
     
     def get_chunk_statistics(self) -> Dict[str, Any]:
         """Get statistics about the chunks"""
