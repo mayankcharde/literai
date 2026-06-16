@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime
 import sys
 from pathlib import Path
+import os
 
 
 # Add these imports to existing main.py
@@ -13,17 +14,19 @@ from rag_engine import ResearchRAGEngine
 import json
 
 
-# Store RAG engines per research ID
+# Store RAG engines per research/session ID
 rag_engines: Dict[str, ResearchRAGEngine] = {}
 
 # New Pydantic models for RAG
 class RAGSetupRequest(BaseModel):
-    research_id: str
+    research_id: Optional[str] = None
+    session_id: Optional[str] = None
     report: str
     topic: Optional[str] = ""
 
 class RAGAskRequest(BaseModel):
-    research_id: str
+    research_id: Optional[str] = None
+    session_id: Optional[str] = None
     question: str
 
 # Add backend directory to path
@@ -211,26 +214,32 @@ async def list_sessions():
 
 @app.post("/research/rag/setup")
 async def setup_rag(request: RAGSetupRequest):
-    """Setup RAG with report text directly"""
+    """Setup RAG with report text directly. Accepts either research_id or session_id."""
+    # Get the ID (research_id takes priority if both are provided)
+    id_value = request.research_id or request.session_id
+    if not id_value:
+        raise HTTPException(status_code=400, detail="Either research_id or session_id is required")
+    
     if not request.report:
         raise HTTPException(status_code=400, detail="Report content is required")
     
     try:
-        # Create a new RAG engine for this research ID
+        # Create a new RAG engine for this ID
         rag_engine = ResearchRAGEngine(chunk_size=500, chunk_overlap=100)
         rag_engine.create_vectorstore(
             report=request.report,
             metadata={
-                "research_id": request.research_id,
+                "id": id_value,
                 "topic": request.topic,
                 "created_at": datetime.now().isoformat()
             }
         )
-        rag_engines[request.research_id] = rag_engine
+        rag_engines[id_value] = rag_engine
         
         return {
             "status": "success",
             "message": "RAG system initialized",
+            "id": id_value,
             "stats": rag_engine.get_chunk_statistics()
         }
     except Exception as e:
@@ -241,16 +250,18 @@ async def setup_rag(request: RAGSetupRequest):
 
 @app.post("/research/rag/ask")
 async def ask_question(request: RAGAskRequest):
-    """Ask a question about a specific research report"""
+    """Ask a question about a specific research report. Accepts either research_id or session_id."""
     if not request.question:
         raise HTTPException(status_code=400, detail="Question required")
-    if not request.research_id:
-        raise HTTPException(status_code=400, detail="Research ID required")
+    
+    id_value = request.research_id or request.session_id
+    if not id_value:
+        raise HTTPException(status_code=400, detail="Either research_id or session_id is required")
     
     try:
-        rag_engine = rag_engines.get(request.research_id)
+        rag_engine = rag_engines.get(id_value)
         if not rag_engine or not rag_engine.is_initialized:
-            raise HTTPException(status_code=400, detail="RAG not initialized for this research. Please call /research/rag/setup first.")
+            raise HTTPException(status_code=400, detail="RAG not initialized for this research/session. Please call /research/rag/setup first.")
         
         result = rag_engine.ask_question(request.question)
         return result
@@ -263,11 +274,17 @@ async def ask_question(request: RAGAskRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/research/rag/summary")
-async def get_rag_summary(research_id: Optional[str] = None, report: Optional[str] = None):
-    """Get a summary from a specific RAG system, or generate directly from report"""
+async def get_rag_summary(
+    research_id: Optional[str] = None, 
+    session_id: Optional[str] = None, 
+    report: Optional[str] = None
+):
+    """Get a summary from a specific RAG system, or generate directly from report."""
     try:
-        if research_id and research_id in rag_engines:
-            rag_engine = rag_engines.get(research_id)
+        id_value = research_id or session_id
+        
+        if id_value and id_value in rag_engines:
+            rag_engine = rag_engines.get(id_value)
             if rag_engine and rag_engine.is_initialized:
                 summary = rag_engine.get_summary()
                 return {"summary": summary}
@@ -277,19 +294,26 @@ async def get_rag_summary(research_id: Optional[str] = None, report: Optional[st
             simple_summary = report[:1000] + ("..." if len(report) > 1000 else "")
             return {"summary": simple_summary}
         
-        raise HTTPException(status_code=400, detail="Either research_id or report is required")
+        raise HTTPException(status_code=400, detail="Either research_id/session_id with initialized RAG or report is required")
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/research/rag/stats")
-async def get_rag_stats(research_id: str):
-    """Get RAG system statistics for a specific research"""
+async def get_rag_stats(
+    research_id: Optional[str] = None, 
+    session_id: Optional[str] = None
+):
+    """Get RAG system statistics for a specific research/session."""
     try:
-        rag_engine = rag_engines.get(research_id)
+        id_value = research_id or session_id
+        if not id_value:
+            raise HTTPException(status_code=400, detail="Either research_id or session_id is required")
+            
+        rag_engine = rag_engines.get(id_value)
         if not rag_engine:
-            raise HTTPException(status_code=400, detail="RAG not initialized for this research")
+            raise HTTPException(status_code=400, detail="RAG not initialized for this research/session")
         
         stats = rag_engine.get_chunk_statistics()
         return stats
@@ -301,4 +325,20 @@ async def get_rag_stats(research_id: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8000, reload=False, timeout_keep_alive=600)
+    from dotenv import load_dotenv
+    
+    # Load environment variables
+    load_dotenv()
+    
+    # Get host and port from environment variables, with defaults
+    host = os.getenv("HOST", "0.0.0.0")  # Use 0.0.0.0 for production, 127.0.0.1 for local
+    port = int(os.getenv("PORT", "8000"))
+    
+    # Run with production-ready settings
+    uvicorn.run(
+        app, 
+        host=host, 
+        port=port, 
+        reload=False,  # Always disable reload in production
+        timeout_keep_alive=600
+    )
